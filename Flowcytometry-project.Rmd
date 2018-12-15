@@ -1,0 +1,296 @@
+---
+title: "Flowcytometry"
+author: "Matt"
+date: "10/31/2018"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(knitr)
+
+opts_knit$set(root.dir = "~/Box Sync/EEB_401/FCM_data/BoatCleaner_26Oct18")
+
+#library(devtools)
+#install_github("rprops/Phenoflow_package")
+library("Phenoflow") # for fingerprinting
+library("flowViz") # for plotting
+library("ggplot2") # for plotting
+library("flowAI") # for denoising
+library(dplyr)
+set.seed(777)
+
+#data(flowData)
+path = "~/Box Sync/EEB_401/FCM_data/BoatCleaner_26Oct18/fcs_files/"
+flowData <- read.flowSet(path = path, transformation = FALSE, pattern=".fcs", emptyValue=FALSE)
+
+attributes(flowData)
+
+# import metadata file
+meta <- read.table("~/Box Sync/EEB_401/FCM_data/BoatCleaner_26Oct18/BoatCleanerFCM.txt", header=TRUE, sep="\t", fill=TRUE)
+
+```
+
+```{r}
+# Select phenotypic features of interest and transform parameters
+flowData_transformed <- transform(flowData,`BL1-H`=asinh(`BL1-H`), 
+                                   `SSC-H`=asinh(`SSC-H`), 
+                                   `BL3-H`=asinh(`BL3-H`), 
+                                   `FSC-H`=asinh(`FSC-H`))
+param=c("BL1-H", "BL3-H","SSC-H","FSC-H")
+remove(flowData)
+
+### Create a PolygonGate for denoising the dataset
+### Define coordinates for gate in sqrcut1 in format: c(x,x,x,x,y,y,y,y)
+sqrcut1 <- matrix(c(8.75,8.75,14,14,3,7.5,14,3),ncol=2, nrow=4)
+colnames(sqrcut1) <- c("BL1-H","BL3-H")
+polyGate1 <- polygonGate(.gate=sqrcut1, filterId = "Total Cells")
+
+###  Gating quality check
+xyplot(`BL3-H` ~ `BL1-H`, data=flowData_transformed[1:1], filter=polyGate1,
+       scales=list(y=list(limits=c(0,14)),
+                   x=list(limits=c(6,16))),
+       axis = axis.default, nbin=125, 
+       par.strip.text=list(col="white", font=2, cex=2), smooth=FALSE)
+```
+```{r transform_maxval}
+
+summary <- fsApply(x = flowData_transformed, FUN = function(x) apply(x, 2, max), use.exprs = TRUE)
+maxval <- max(summary[,"BL1-H"]) # Replace with the column representing the green fluorescence channel (e.g. "FITC-H")
+mytrans <- function(x) x/maxval
+
+flowData_transformed <- transform(flowData_transformed,`BL1-H`=mytrans(`BL1-H`),
+                                  `BL3-H`=mytrans(`BL3-H`), 
+                                  `SSC-H`=mytrans(`SSC-H`),
+                                  `FSC-H`=mytrans(`FSC-H`))
+```
+
+
+```{r density_calc}
+
+### Normalize total VLP gate
+sqrcut1_norm <- matrix(c(8.75,8.75,14,14,3,7.5,14,3)/maxval,ncol=2, nrow=4)
+colnames(sqrcut1_norm) <- c("BL1-H","BL3-H")
+polyGate1_norm <- polygonGate(.gate=sqrcut1_norm, filterId = "Total Cells")
+
+
+### Check if rectangle gate is correct for negative samples, if not, adjust sqrcut1_norm
+xyplot(`BL3-H` ~ `BL1-H`, data=flowData_transformed[16:18], filter=polyGate1_norm,
+       scales=list(y=list(limits=c(0,1)),
+                   x=list(limits=c(0.4,1))),
+       axis = axis.default, nbin=125, par.strip.text=list(col="white", font=2, 
+                                                          cex=2), smooth=FALSE)
+
+### Check if rectangle gate is correct for test samples, if not, adjust sqrcut1_norm
+xyplot(`BL3-H` ~ `BL1-H`, data=flowData_transformed[1:3], filter=polyGate1_norm,
+       scales=list(y=list(limits=c(0,1)),
+                   x=list(limits=c(0.4,1))),
+       axis = axis.default, nbin=125, par.strip.text=list(col="white", font=2, 
+                                                          cex=2), smooth=FALSE)
+
+### Extract the volume, add to meta table
+#vol <- as.numeric(flowCore::fsApply(flowData_transformed, FUN = function(x) x@description$`$VOL`))/1000
+
+meta$Volume<-as.numeric(flowCore::fsApply(flowData_transformed, FUN = function(x) x@description$`$VOL`))/1000
+
+### Extract the cell counts
+
+s_g1 <- flowCore::filter(flowData_transformed, polyGate1_norm)
+TotalCount_g1 <- summary(s_g1);TotalCount_g1 <- toTable(TotalCount_g1)
+colnames(TotalCount_g1)[1] <- "Sample_name"
+colnames(meta)[1] <- "Sample_name"
+
+### Account for volume and dilution factors
+
+TotalCount_g1.meta<-inner_join(TotalCount_g1,meta, by="Sample_name")
+TotalCount_g1.meta$Cells_per_ml<-TotalCount_g1.meta$true/as.numeric(TotalCount_g1.meta$Volume)*(1000/1)
+
+###colnames(TotalCount_g1.meta)<-c("Sample_name","population","percent_g1","count_g1","true_g1","false_g1","p_g1","q_g1","sample_num","description","depth_m","rep","filt_um","Duration","Rate","Volume","Dilution","VLP1","VLP1_mL","VLPs_per_ml_g1")
+
+colnames(TotalCount_g1.meta)
+#View(TotalCount_g1.meta)
+
+
+###plot_gates_g1 <- ggplot(data = TotalCount_g1.meta, aes(x = as.numeric(as.character(Time)), y = Cells_per_ml, fill=Condition, color=Condition))+
+  ###geom_point(size = 1, alpha = 0.7)+
+  ###scale_color_manual(values = c("#a65628", "red", "#ffae19", "#4daf4a", "#1919ff", "darkorchid3", "magenta"))+
+  
+  ###theme_bw()+
+  ###labs(y = "Cell counts (ml)", x = "Time (hours)")+
+  ###ggtitle("Live cells over time (Gate 1)") 
+  
+  
+  
+  
+  ###plot_gates_g1
+
+TotalCount_g1.meta <- TotalCount_g1.meta %>%
+  filter(Time != "9")
+
+dim(TotalCount_g1.meta)
+
+  
+  plot_gates_g1 <- ggplot(data = TotalCount_g1.meta, aes(x = as.numeric(as.character(Time)), y = Cells_per_ml, fill=Condition, color=Condition))+
+  geom_point(size = 1, alpha = 0.7)+
+  geom_line(size = .5)+
+  scale_color_manual(values = c("#a65628", "red", "#ffae19", "#4daf4a", "chartreuse1", "deepskyblue1", "blue1"))+
+  theme_bw()+
+  labs(y = "Cell counts (ml)", x = "Time (hours)")+
+  ggtitle("Live cells over time (Gate 1)") 
+
+ plot_gates_g1
+ 
+plot_gates_g1_box <- ggplot(data = TotalCount_g1.meta, aes(x = Condition, y = Cells_per_ml, fill=Condition, color=Condition))+
+  geom_boxplot()+
+  theme_bw()+
+  labs(y = "Cell counts (ml)", x = "Time")+
+  ggtitle("Live cells over time (Gate 1)") 
+
+plot_gates_g1_box
+
+  
+```
+```{r takeout9}
+TotalCount_g1.meta_no9 <- TotalCount_g1.meta %>%
+  filter(Time != "9")
+
+dim(TotalCount_g1.meta)
+dim(TotalCount_g1.meta_no9)
+```
+
+```{r alpha_diversity}
+###making fbasis
+fbasis <- flowBasis(flowData_transformed, param, nbin=128, 
+                   bw=0.01,normalize=function(x) x)
+
+
+### Calculate Diversity from normalized fingerprint 
+Diversity.fbasis <- Diversity(fbasis,d=3,plot=FALSE, R=999)
+
+
+Diversity.fbasis.meta<-inner_join(Diversity.fbasis, TotalCount_g1.meta_no9, by="Sample_name")
+
+
+
+p1 <- ggplot(data = Diversity.fbasis.meta, aes(x = as.numeric(as.character(Time)), y = D2, color = Condition))+
+  geom_point(size = 3, alpha = 0.7)+
+  geom_line()+
+  ggtitle("Alpha Diversity of FCM Samples by Condition")+
+  #scale_color_manual(values = c("#a65628", "red", 
+                                #"#ffae19", "#4daf4a", "#1919ff", "darkorchid3", "magenta"))+
+  scale_color_manual(values = c("#a65628", "red", "#ffae19", "#4daf4a", "chartreuse1", "deepskyblue1", "blue1"))+
+  theme_bw()+
+  labs(color = "Condition", y = "Phenotypic diversity (D2)", x = "Hours")+
+  geom_errorbar(aes(ymin=D2-sd.D2, ymax=D2+sd.D2), width=0.05, color="black")
+print(p1)
+
+```
+
+```{r cleaning_alpha_diversity}
+
+Diversity.clean <- Diversity_rf(flowData_transformed, param = param, R = 3, R.b = 3,
+cleanFCS = FALSE)
+
+colnames(Diversity.clean)[1] <-"Sample_name"
+
+Diversity.clean.meta<-inner_join(Diversity.clean, TotalCount_g1.meta, by="Sample_name")
+
+
+
+p2 <- ggplot(data = Diversity.clean.meta, aes(x = as.numeric(as.character(Time)), y = D2, color = Condition))+
+  geom_point(size = 3, alpha = 0.7)+
+  geom_line()+
+  scale_color_manual(values = c("#a65628", "red", 
+                                "#ffae19", "#4daf4a", "#1919ff", "darkorchid3", "magenta"))+
+  theme_bw()+
+  labs(color = "Condition", y = "Phenotypic diversity (D2)", x = "Hours")+
+  geom_errorbar(aes(ymin=D2-sd.D2, ymax=D2+sd.D2), width=0.05, color="black")
+print(p2)
+
+
+print(p1)
+print(p2)
+
+
+```
+
+```{r beta_diversity}
+
+# Beta-diversity assessment of fingerprint
+beta.div <- beta_div_fcm(fbasis, ord.type="PCoA")
+
+beta.div_gate1<-beta.div
+
+beta.div_gate1.df<-as.data.frame(beta.div_gate1$points)
+beta.div_gate1.df$Sample_name <- rownames(beta.div_gate1.df)
+#beta.div.fbasis.meta<-inner_join(beta.div.df,Christel2_meta, by="Sample_name")
+beta.div.fbasis_gate1.meta<-inner_join(beta.div_gate1.df,TotalCount_g1.meta_no9, by="Sample_name")
+
+# store % variation ("values") for the first 4 vectors
+bray_eigen1_pct_gate1<-round(beta.div_gate1$eig[1]/sum(beta.div_gate1$eig) * 100, digits = 1)
+bray_eigen2_pct_gate1<-round(beta.div_gate1$eig[2]/sum(beta.div_gate1$eig) * 100, digits = 1)
+bray_eigen3_pct_gate1<-round(beta.div_gate1$eig[3]/sum(beta.div_gate1$eig) * 100, digits = 1)
+bray_eigen4_pct_gate1<-round(beta.div_gate1$eig[4]/sum(beta.div_gate1$eig) * 100, digits = 1)
+bray_axis1.gate1 <- paste("PCoA1:",bray_eigen1_pct_gate1,"%")
+bray_axis2.gate1 <- paste("PCoA2:",bray_eigen2_pct_gate1,"%")
+bray_axis3.gate1 <- paste("PCoA3:",bray_eigen3_pct_gate1,"%")
+bray_axis4.gate1 <- paste("PCoA4:",bray_eigen4_pct_gate1,"%")
+
+###beta.div.fbasis_gate1.meta$depth_m <- factor(beta.div.fbasis_gate1.meta$depth_m, levels = c("3","5","11","13","15","17","19","control"))
+
+beta.div.fbasis_gate1.meta.plot<- ggplot(beta.div.fbasis_gate1.meta, aes(V1, V2, color=Condition))+
+  xlab(bray_axis1.gate1) + 
+  ylab(bray_axis2.gate1) +
+  geom_point(size=3)+
+  theme_bw()+
+  ggtitle("PCoA Phenotypic Diversity of Baseline Lake Microbes (Gate 1)")+
+  scale_color_manual(values = c("#a65628", "red", "#ffae19", "#4daf4a", "chartreuse1", "deepskyblue1", "blue1"))+
+  theme(plot.title = element_text(lineheight=.8, face="bold"))
+beta.div.fbasis_gate1.meta.plot
+```
+
+```{r Beta_diversity_time}
+
+beta.div.fbasis_gate1.meta$Time<-as.character(beta.div.fbasis_gate1.meta$Time)
+
+beta.div.fbasis_gate1.meta$Time <- factor(beta.div.fbasis_gate1.meta$Time, levels = c("0","1","2","3","4","5","6","7", "8", "9", "10"))
+
+beta.div.fbasis_gate1_byTime.meta.plot<- ggplot(beta.div.fbasis_gate1.meta, aes(V1, V2, color=Time))+
+  xlab(bray_axis1.gate1) + 
+  ylab(bray_axis2.gate1) +
+#  geom_point(size=4, aes(color=Condition))+
+  geom_point(size=3)+
+  theme_bw()+
+  ggtitle("PCoA Phenotypic Diversity of Strawberry Lake Microbes (Gate 1)")+
+  scale_color_manual(values = c("#a50026",
+                                "#d73027",
+                                "#f46d43",
+                                "#fdae61",
+                                "#fee090",
+                                "#ffffbf",
+                                "#e0f3f8",
+                                "#abd9e9",
+                                "#74add1",
+                                '#4575b4',
+                                '#313695'))+
+  theme(plot.title = element_text(lineheight=.8, face="bold"))
+beta.div.fbasis_gate1_byTime.meta.plot
+
+
+length(unique(beta.div.fbasis_gate1.meta$Time))
+
+
+```
+
+```{r beta_nmds}
+
+beta.div.nmds <- beta_div_fcm(fbasis, ord.type="NMDS")
+
+plot(beta.div.nmds)
+
+#look here for ggplot nmds: https://chrischizinski.github.io/rstats/vegan-ggplot2/
+
+```
