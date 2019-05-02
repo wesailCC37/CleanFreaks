@@ -1,0 +1,387 @@
+---
+title: "EEB401_all"
+author: "Melissa"
+date: "2/4/2019"
+output: html_document
+---
+
+# Setting up the RStudio/knitr environment
+```{r set-global-options, echo = TRUE}
+require(knitr)
+opts_knit$set(root.dir = "~/Box Sync/EEB_401/CF_19_16S/")
+
+knitr::opts_chunk$set(eval = TRUE, 
+                      echo = TRUE, 
+                       cache = FALSE,
+                      include = TRUE,
+                      collapse = FALSE,
+                      message=FALSE,
+                      warning=FALSE,
+                      dependson = NULL,
+                      error = TRUE,
+                      fig.align = "center"
+)
+```
+
+
+## Setting up the R environment
+```{r setup}
+
+#libraries and packages
+list.of.packages <- c(
+  "knitr",
+  "ggplot2",
+  "vegan",
+  "dplyr",
+  "scales",
+  "grid",
+  "reshape2",
+  "dplyr",
+  "phyloseq",
+  "magrittr",
+  "geosphere",
+  "matrixStats",
+  "data.table",
+  "DT"
+  ) 
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])] 
+if(length(new.packages)) install.packages(new.packages)
+
+#source codes
+#source("https://raw.githubusercontent.com/joey711/phyloseq/master/inst/scripts/installer.R", local = TRUE)
+source("https://bioconductor.org/biocLite.R")
+biocLite("DESeq2")
+#biocLnite("annotate")
+
+#source('http://bioconductor.org/biocLite.R')
+#biocLite('phyloseq')
+library(ggplot2) 
+library(vegan) 
+library(dplyr) 
+library(scales) 
+library(grid) 
+library(reshape2)
+library(plyr)
+library(phyloseq) 
+library(magrittr)
+library(geosphere)
+library(matrixStats)
+library(data.table)
+library(DT)
+library(DESeq2)
+library(colorspace)
+
+#shortened theme
+#theme_set(theme_bw())
+
+setwd("~/Box Sync/EEB_401/CF_19_16S/")
+#setwd("~/EEB_401/AvBot2017/class_content/")
+
+#set seed so all random number generation is the same
+set.seed(15879966)
+
+```
+
+### Importing Data and Creating Phyloseq Object
+Import data (three files: shared (OTUfile), taxonomy (TAXfile), and metadata (mapfile)) Then combining data files into one phyloseq object for analysis (all_data)
+
+```{r data_import_create_phylo}
+# Assign variables for imported data
+sharedfile = "stability.trim.contigs.good.unique.good.filter.unique.precluster.pick.pick.an.unique_list.shared"
+taxfile = "stability.trim.contigs.good.unique.good.filter.unique.precluster.pick.pick.an.unique_list.0.03.cons.taxonomy"
+
+# Import mothur data and write a sample name file
+mothur_data <- import_mothur(mothur_shared_file = sharedfile,
+  mothur_constaxonomy_file = taxfile)
+sample_names(mothur_data)
+
+#write.table(sample_names(mothur_data), file = "EEB_all_for_physeq.sample_names", sep = "\t",
+#            row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+# Import sample metadata
+mapfile = "EEB_all_for_physeq.meta"
+map <- read.table(mapfile, header=TRUE, sep="\t")
+map <- sample_data(map)
+#head(map)
+rownames(map) <- map$Sample_ID
+
+phylo_all <- merge_phyloseq(mothur_data, map) # the final phyloseq object to work with
+phylo_all
+
+
+
+```
+
+## Filter by Group
+```{r group_filter}
+
+CleanFreaks<-phylo_all %>% subset_samples( group == "CleanFreaks" | group == "all")
+#Antimicrobials<-phylo_all %>% subset_samples( group == "Antimicrobials" | group == "all")
+#Gloeo<-phylo_all %>% subset_samples( group == "Gloeo" | group == "all")
+#zebra<-phylo_all %>% subset_samples( group == "zebra" | group == "all")
+#AvBot<-phylo_all %>% subset_samples( group == "AvBot" | group == "all")
+
+# change Rank 1-7 to actual taxonomy labels
+colnames(tax_table(CleanFreaks)) = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+# check that it worked
+rank_names(CleanFreaks)
+
+# New metadata file, ensure sample count and Sample_ID matches
+map2 <- read.table("16S_CF.meta", header=TRUE, sep="\t")
+map2 <- sample_data(map2)
+rownames(map2) <- map2$Sample_ID
+sample_data(CleanFreaks) <- map2
+```
+
+
+## Explore samples
+```{r seq_counts}
+# make a data frame with a column for the sequence counts of each sample
+CleanFreaks_sum_df <- data.frame(sum = sample_sums(CleanFreaks))
+datatable(CleanFreaks_sum_df, 
+          options = list(pageLength = 10),
+          caption = "Sum of sequences per sample"
+          )
+# From sorting this table by decreasing sequence count, we can see that there were a few samples that had only a small number of reads. We will remove these (prune) from our data for analysis later on.
+
+```
+Next we will calculate summary statistics describing the sequence counts with the summary() function. We will then represent these stats with a boxplot and a histogram
+```{r summary}
+
+#summary statistics of sequence counts
+summary(CleanFreaks_sum_df$sum)
+
+#histogram of sample read counts
+ggplot(CleanFreaks_sum_df, aes(x = sum)) + 
+  geom_histogram(color = "black", fill = "purple", binwidth = 500) +
+  ggtitle("Distribution of sample sequencing depth") + 
+  xlab("Read counts") +
+  theme(axis.title.y = element_blank())
+
+```
+##  Prune low read samples and non-target taxa
+
+We can directly prune our phyloseq object to remove samples with <1000 sequences. Then we create a new pruned phyloseq object.
+
+Looks like none of the negative or water controls have more reads than the 1000 cutoff, so good to proceed with the samples we have.
+
+```{r prune_lt1000}
+          
+CleanFreaks <- prune_samples(sample_sums(CleanFreaks) > 1000, CleanFreaks)
+
+CleanFreaks <- CleanFreaks %>%
+  subset_taxa(
+    Domain == "Bacteria" &
+    Family  != "mitochondria" &
+    Class   != "Chloroplast"
+  )
+```
+
+```{r pcoa_bc}
+
+CleanFreaks_log <- transform_sample_counts(CleanFreaks, function(x) log(1 + x))
+
+# Ordinate
+cleanfreaks_log.ord <- ordinate(
+  physeq = CleanFreaks_log  %>%
+  subset_samples(
+    Treatment != "NA"), 
+  method = "PCoA", 
+  distance = "bray"
+)
+
+# Plot 
+plot_ordination(
+  physeq = CleanFreaks_log,
+  ordination = cleanfreaks_log.ord,
+  color = "Treatment",
+  shape = "Time",
+  title = "PCoA of Bacterial Communities from CleanFreaks Project"
+) + 
+#  scale_color_manual(values = c("#a65628", "red", "#ffae19",
+#    "#4daf4a", "#1919ff", "darkorchid3", "magenta")
+#  ) +
+  geom_point(aes(color = Treatment), alpha = 0.7, size = 3) +
+  geom_point(colour = "grey90", size = 1.5) 
+```
+```{r pcoa_sor}
+
+CleanFreaks_log <- transform_sample_counts(CleanFreaks, function(x) log(1 + x))
+
+# Ordinate
+cleanfreaks_log_sor.ord <- ordinate(
+  physeq = CleanFreaks_log  %>%
+  subset_samples(
+    Treatment != "NA"), 
+  method = "PCoA", 
+  distance = "bray",
+  binary=TRUE
+)
+
+# Plot 
+plot_ordination(
+  physeq = CleanFreaks_log,
+  ordination = cleanfreaks_log_sor.ord,
+  color = "Treatment",
+  shape = "Time",
+  title = "PCoA of Bacterial Communities from CleanFreaks Project (sor)"
+) + 
+#  scale_color_manual(values = c("#a65628", "red", "#ffae19",
+#    "#4daf4a", "#1919ff", "darkorchid3", "magenta")
+#  ) +
+  geom_point(aes(color = Treatment), alpha = 0.7, size = 3) +
+  geom_point(colour = "grey90", size = 1.5) 
+```
+
+```{r tax_plot_phyla}
+
+#plot_bar(CleanFreaks_log, x="Treatment", fill="Phylum") # takes a long time
+
+CleanFreaks_log.phylum <- CleanFreaks_log %>%
+ tax_glom(taxrank = "Phylum") %>%                      #agglomerate at phylum level
+ transform_sample_counts(function(x) {x/sum(x)}) %>%   # Transform to rel. abundance
+ psmelt() %>%                                          # Melt to long format
+ filter(Abundance > 0.02) %>%                          # Filter out low abund phyla (<2%) for plotting ease
+ arrange(Phylum)
+
+#Plot of Phylum level relative abundance differences between samples
+ggplot(CleanFreaks_log.phylum, aes(x = Treatment, y = Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "fill") +
+  #scale_fill_manual(values = phylum.colors) +                                 # colors from functions code
+  guides(fill = guide_legend(reverse = TRUE, keywidth = 1, keyheight = 1)) +
+  ylab("Relative Abundance (Phyla)") +
+  ggtitle("Bacterial Communities by Sample type Phylum level")+
+  facet_grid(Time~.)
+
+```
+
+
+```{r tax_plot_class}
+
+#plot_bar(CleanFreaks_log, x="Treatment", fill="Phylum") # takes a long time
+
+CleanFreaks_log.class <- CleanFreaks_log %>%
+ tax_glom(taxrank = "Class") %>%                      #agglomerate at phylum level
+ transform_sample_counts(function(x) {x/sum(x)}) %>%   # Transform to rel. abundance
+ psmelt() %>%                                          # Melt to long format
+ filter(Abundance > 0.02) %>%                          # Filter out low abund class (<2%) for plotting ease
+ arrange(Class)
+
+#Plot of Class level relative abundance differences between samples
+ggplot(CleanFreaks_log.class, aes(x = Treatment, y = Abundance, fill = Class)) +
+  geom_bar(stat = "identity", position = "fill") +
+  guides(fill = guide_legend(reverse = TRUE, keywidth = 1, keyheight = 1)) +
+  ylab("Relative Abundance (Class)") +
+  ggtitle("Bacterial Communities by Sample type Class level")+
+  facet_grid(Time~.)
+
+```
+
+
+# PART VI: Over and under-representation with DESeq2
+We use DESeq2 to explore over and under representation of taxa in different sample types.
+DESeq2 is sensitive to sparse tables (tables with lots of 0s)--such as tables that would result if we look at all OTUs in all samples. For a less sparse OTU table, we will only look at OTUs that are neither rare nor sporadic (plast_phylo_pruned_final_ubiq06).
+
+## Pairwise comparisons between sample types
+Lets create pairwise comparisons between sample types for downstream analysis and calculate OTU-totals for each pairwise comparison.
+
+```{r setup_pairwise_comps}
+
+sample_data(CleanFreaks_log)
+
+#Pairwise Comparisons on the final pruned phyloseq
+SB_vs_SG <- CleanFreaks_log %>% subset_samples( Treatment == "Starbrite" | Treatment == "Simple_Green")
+control_vs_SB <- CleanFreaks_log %>% subset_samples( Treatment == "Control" | Treatment == "Starbrite")
+control_v_SG <- CleanFreaks_log %>% subset_samples( Treatment == "Control" | Treatment == "Simple_Green")
+
+# SB_vs_SG 
+## Calculate OTU-totals for the SB_vs_SG pairwise comparison dataset 
+taxa_sums.SB_vs_SG <-as.data.frame(taxa_sums(SB_vs_SG)) #get OTU-totals
+#setDT(taxa_sums.SB_vs_SG, keep.rownames = TRUE)[]
+taxa_sums.SB_vs_SG <- data.frame(names = row.names(taxa_sums.SB_vs_SG), taxa_sums.SB_vs_SG)
+colnames(taxa_sums.SB_vs_SG)[1] <- "OTU"
+colnames(taxa_sums.SB_vs_SG)[2] <-"OTU_total" #label the 1st column OTU_total
+sum(taxa_sums.SB_vs_SG$OTU_total == "0") #0
+class(taxa_sums.SB_vs_SG)
+
+# The control_vs_SB dataset 
+## Calculate OTU-totals for the control_vs_SB pairwise comparison dataset  
+taxa_sums.control_vs_SB <-as.data.frame(taxa_sums(control_vs_SB)) #get OTU-totals
+#setDT(taxa_sums.control_vs_SB, keep.rownames = TRUE)[]
+taxa_sums.control_vs_SB <- data.frame(names = row.names(taxa_sums.control_vs_SB), taxa_sums.control_vs_SB)
+colnames(taxa_sums.control_vs_SB)[1] <- "OTU"
+colnames(taxa_sums.control_vs_SB)[2] <-"OTU_total" #label the 1st column OTU_total
+sum(taxa_sums.control_vs_SB$OTU_total == "0") #0
+class(taxa_sums.control_vs_SB)
+
+# The control_v_SG dataset 
+## Calculate OTU-totals for the control_v_SG pairwise comparison dataset 
+taxa_sums.control_v_SG <-as.data.frame(taxa_sums(control_v_SG)) #get OTU-totals
+colnames(taxa_sums.control_v_SG)[1] <-"OTU_total" #label the 1st column OTU_total
+sum(taxa_sums.control_v_SG$OTU_total == "0") #0 
+sum(taxa_sums.control_v_SG$OTU_total == "0") #0 
+head(taxa_sums.control_v_SG)
+#setDT(taxa_sums.control_v_SG, keep.rownames = TRUE)[]
+colnames(taxa_sums.control_v_SG)[1] <- "OTU"
+head(taxa_sums.control_v_SG)
+
+```
+
+What follows is DESeq2 analys with the three pairwise comparisons of (1) SG v SG, (2) Plastic vs FL, and (3) PA vs FL
+
+Note, OTUs with 0 counts are problematic and are dealt with per:
+From [Michael Love](Michael Love) on the [Bioconductor support forum](https://support.bioconductor.org/p/62246/#62250) <i>The median ratio method defined in the first DESeq paper requires calculation of the geometric mean of a row, which is 0 if a single count has a 0, and then taking the ratio of a sample to the geometric mean.</i>
+
+Also, note (from [here](https://github.com/joey711/phyloseq/issues/387)) that a high prevalence of sparsely sampled OTUs can lead to the following error:
+```
+Error in estimateSizeFactorsForMatrix(counts(object), locfunc, geoMeans = geoMeans) : 
+  every gene contains at least one zero, cannot compute log geometric means
+Calls: estimateSizeFactors ... estimateSizeFactors -> .local -> estimateSizeFactorsForMatrix
+```
+
+This has to do with the geometric mean (its sensitivity to zeroes), which has no "official" encoding in base R:
+
+http://stackoverflow.com/questions/2602583/geometric-mean-is-there-a-built-in
+
+Here we use all the data (>1000 reads, but not the ubiquitous set) and the zero-sensitive formula for calculating geometric means.
+
+### SG vs SB, OTU test plotted at Phylum level
+
+
+```{r DESeq2_SB_v_SG}
+
+# DESEQ 
+## Starbrite vs Simple_Green, no zero in the OTU table 
+SB_vs_SG_deseq2 = phyloseq_to_deseq2(SB_vs_SG, ~Treatment )
+
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+geoMeans = apply(counts(SB_vs_SG_deseq2), 1, gm_mean)
+SB_vs_SG_deseq2 = estimateSizeFactors(SB_vs_SG_deseq2, geoMeans = geoMeans)
+SB_vs_SG_deseq2 = DESeq(SB_vs_SG_deseq2, fitType="local")    # takes ~5 mins to run
+
+results.SB_vs_SG = results(SB_vs_SG_deseq2) #put the results in a dataframe
+results.SB_vs_SG = results.SB_vs_SG[order(results.SB_vs_SG$padj, na.last=NA), ] #order by adjusted p value and remove entries with an NA value
+alpha = 0.01 #set significance 
+sigtab.SB_vs_SG = results.SB_vs_SG[(results.SB_vs_SG$padj < alpha), ] #make a significant dataframe, with only adjusted p-value above alpha
+sigtab.SB_vs_SG = cbind(as(sigtab.SB_vs_SG, "data.frame"), as(tax_table(SB_vs_SG)[rownames(sigtab.SB_vs_SG), ], "matrix")) 
+dim(results.SB_vs_SG) #2134 = all results 
+dim(results.SB_vs_SG) #664 = significant results 
+sum(sigtab.SB_vs_SG$OTU == 0) #there are 0 OTUs that equal 0
+sigtab.SB_vs_SG_OTU <- merge(sigtab.SB_vs_SG, taxa_sums.SB_vs_SG, by="OTU", all=TRUE) #merge the significant results with taxa_sums
+#This creates a datatable that has multiple OTUs that either do not have significant results or were not included in the pairwise comparison table to begin with
+#head(sigtab.p_vs_PA_OTU) #check that OTU_total is now on the dataframe
+dim(sigtab.SB_vs_SG_OTU) #8848    16 
+sum(is.na(sigtab.SB_vs_SG_OTU$OTU_total)) #0 There are no OTU_totals that are NA
+sum(is.na(sigtab.SB_vs_SG_OTU$OTU)) #0 There are no OTUs that are NA
+sum(is.na(sigtab.SB_vs_SG_OTU$Phylum)) #8184 There are quite a few of Phylum that are NA
+sigtab.SB_vs_SG_OTU_noPhylumNA <- subset(sigtab.SB_vs_SG_OTU, sigtab.p_vs_PA_OTU$Phylum != "NA") #get rid of Phylum = NA
+sigtab.SB_vs_SG_OTU_noPhylumNA_noSubspecies <-subset(sigtab.SB_vs_SG_OTU_noPhylumNA, select=-c(Subspecies))
+sigtab.SB_vs_SG_OTU_noPhylumNA_noSubspecies[!complete.cases(sigtab.SB_vs_SG_OTU_noPhylumNA_noSubspecies),] #make sure there are no rows with missing values 
+dim(sigtab.SB_vs_SG_OTU_noPhylumNA_noSubspecies) #664  15
+#head(sigtab.p_vs_PA_OTU_noPhylumNA_noSubspecies)
+```
